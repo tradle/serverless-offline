@@ -230,13 +230,13 @@ class Offline {
       apiKey: crypto.createHash('md5').digest('hex'),
     };
 
-    this.options = _.merge({}, defaultOpts, (this.service.custom || {})['serverless-offline'], this.options);
+    this.options = _.merge({}, defaultOpts, (this.service.custom || {})['@tradle/serverless-offline'], this.options);
 
     // Prefix must start and end with '/'
     if (!this.options.prefix.startsWith('/')) this.options.prefix = `/${this.options.prefix}`;
     if (!this.options.prefix.endsWith('/')) this.options.prefix += '/';
 
-    this.globalBabelOptions = ((this.service.custom || {})['serverless-offline'] || {}).babelOptions;
+    this.globalBabelOptions = ((this.service.custom || {})['@tradle/serverless-offline'] || {}).babelOptions;
 
     this.velocityContextOptions = {
       stageVariables: {}, // this.service.environment.stages[this.options.stage].vars,
@@ -319,7 +319,7 @@ class Offline {
     const apiKeys = this.service.provider.apiKeys;
     const protectedRoutes = [];
 
-    if (['nodejs', 'nodejs4.3', 'nodejs6.10', 'nodejs8.10', 'nodejs10.x', 'babel'].indexOf(serviceRuntime) === -1) {
+    if (['nodejs', 'nodejs4.3', 'nodejs6.10', 'nodejs8.10', 'nodejs10.x', 'babel', 'nodejs14.x'].indexOf(serviceRuntime) === -1) {
       this.printBlankLine();
       this.serverlessLog(`Warning: found unsupported runtime '${serviceRuntime}'`);
 
