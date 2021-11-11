@@ -16,7 +16,7 @@ module.exports = function createLambdaProxyContext(request, options, stageVariab
   const headers = request.unprocessedHeaders;
 
   if (body) {
-    if (typeof body !== 'string') {
+    if (typeof body !== 'string' && request.headers['content-encoding'] !== 'gzip') {
       body = JSON.stringify(body);
     }
     headers['Content-Length'] = Buffer.byteLength(body);
@@ -35,7 +35,7 @@ module.exports = function createLambdaProxyContext(request, options, stageVariab
   });
 
   let token = headers.Authorization;
-  
+
   if (token && token.split(' ')[0] === 'Bearer') {
     token = token.split(' ')[1];
   }

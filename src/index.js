@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const exec = require('child_process').exec;
-
+const zlib = require('zlib')
 // External dependencies
 const Hapi = require('hapi');
 const corsHeaders = require('hapi-cors-headers');
@@ -410,6 +410,12 @@ class Offline {
           config: routeConfig,
           handler: (request, reply) => { // Here we go
             // Payload processing
+            const isGzip = request.headers['content-encoding'] === 'gzip'
+            if (isGzip) {
+              request.payload = zlib.gunzipSync(request.payload)
+              delete request.headers['content-encoding']
+              delete request.headers['Content-Encoding']
+            }
             request.payload = request.payload && request.payload.toString();
 
             // Headers processing
@@ -428,6 +434,11 @@ class Offline {
 
               for (let i = 0; i < headersArray.length; i += 2) {
                 unprocessedHeaders[headersArray[i]] = headersArray[i + 1];
+              }
+
+              if (isGzip) {
+                delete unprocessedHeaders['content-encoding']
+                delete unprocessedHeaders['Content-Encoding']
               }
 
               request.unprocessedHeaders = unprocessedHeaders;
