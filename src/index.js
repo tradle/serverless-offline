@@ -7,8 +7,8 @@ const crypto = require('crypto');
 const exec = require('child_process').exec;
 const zlib = require('zlib')
 // External dependencies
-const Hapi = require('hapi');
-const corsHeaders = require('hapi-cors-headers');
+const Hapi = require('@hapi/hapi');
+// const corsHeaders = require('hapi-cors-headers');
 const _ = require('lodash');
 
 // Internal lib
@@ -29,7 +29,8 @@ const parseResources = require('./parseResources');
  */
 class Offline {
 
-  constructor(serverless, options) {
+  // constructor(serverless, options) {
+  constructor(serverless = { cli: { log: console.log } }, options = {}) {
     this.serverless = serverless;
     this.service = serverless.service;
     this.serverlessLog = serverless.cli.log.bind(serverless.cli);
@@ -186,7 +187,7 @@ class Offline {
     });
   }
 
-  _buildServer() {
+  async _buildServer() {
     // Maps a request id to the request's state (done: bool, timeout: timer)
     this.requests = {};
 
@@ -194,7 +195,7 @@ class Offline {
     this._setOptions();     // Will create meaningful options from cli options
     this._storeOriginalEnvironment(); // stores the original process.env for assigning upon invoking the handlers
     this._registerBabel();  // Support for ES6
-    this._createServer();   // Hapijs boot
+    await this._createServer();   // Hapijs boot
     this._createRoutes();   // API  Gateway emulation
     this._createResourceRoutes(); // HTTP Proxy defined in Resource
     this._create404Route(); // Not found handling
@@ -280,37 +281,46 @@ class Offline {
     }
   }
 
-  _createServer() {
+  async _createServer() {
     // Hapijs server creation
-    this.server = new Hapi.Server({
-      connections: {
-        router: {
-          stripTrailingSlash: true, // removes trailing slashes on incoming paths.
-        },
-      },
-    });
-
-    this.server.register(require('h2o2'), err => err && this.serverlessLog(err));
-
-    const connectionOptions = {
-      host: this.options.host,
+    const serverOptions = {
       port: this.options.port,
+      host: this.options.host,
     };
-    const httpsDir = this.options.httpsProtocol;
 
-    // HTTPS support
+    const httpsDir = this.options.httpsProtocol;
     if (typeof httpsDir === 'string' && httpsDir.length > 0) {
-      connectionOptions.tls = {
+      serverOptions.tls = {
         key: fs.readFileSync(path.resolve(httpsDir, 'key.pem'), 'ascii'),
         cert: fs.readFileSync(path.resolve(httpsDir, 'cert.pem'), 'ascii'),
       };
     }
+    this.server = Hapi.server(serverOptions);
 
-    // Passes the configuration object to the server
-    this.server.connection(connectionOptions);
+    await this.server.register(require('@hapi/h2o2'));
 
-    // Enable CORS preflight response
+    const corsHeaders = (request, h) => {
+      const response = request.response.isBoom
+        ? request.response.output
+        : request.response;
+
+      response.headers = response.headers || {};
+      response.headers['access-control-allow-origin'] = '*';
+      response.headers['access-control-allow-credentials'] = 'true';
+      response.headers['access-control-allow-methods'] = 'GET, POST, OPTIONS, PUT, DELETE';
+      response.headers['access-control-allow-headers'] = 'Content-Type, Authorization, X-Requested-With, cache';
+
+      return h.continue;
+    };
+
     this.server.ext('onPreResponse', corsHeaders);
+    // Optional: emulate old stripTrailingSlash behavior
+    this.server.ext('onRequest', (request, h) => {
+      if (request.path.length > 1 && request.path.endsWith('/')) {
+        return h.redirect(request.path.slice(0, -1)).permanent();
+      }
+      return h.continue;
+    });
   }
 
   _createRoutes() {
@@ -319,7 +329,8 @@ class Offline {
     const apiKeys = this.service.provider.apiKeys;
     const protectedRoutes = [];
 
-    if (['nodejs', 'nodejs4.3', 'nodejs6.10', 'nodejs8.10', 'nodejs10.x', 'babel', 'nodejs14.x'].indexOf(serviceRuntime) === -1) {
+console.log(`Service runtime: ${serviceRuntime}`)
+    if (['nodejs', 'nodejs4.3', 'nodejs6.10', 'nodejs8.10', 'nodejs10.x', 'babel', 'nodejs14.x', 'nodejs18.x', 'nodejs18.x-aws-sdk-v2'].indexOf(serviceRuntime) === -1) {
       this.printBlankLine();
       this.serverlessLog(`Warning: found unsupported runtime '${serviceRuntime}'`);
 
@@ -392,11 +403,22 @@ class Offline {
 
         // Route creation
         const routeMethod = method === 'ANY' ? '*' : method;
+
         const routeConfig = {
-          cors,
+          cors: {
+            origin: this.options.corsConfig.origin,
+            headers: this.options.corsConfig.headers,
+            credentials: this.options.corsConfig.credentials,
+          },
           auth: authStrategyName,
           timeout: { socket: false },
         };
+
+        // const routeConfig = {
+        //   cors,
+        //   auth: authStrategyName,
+        //   timeout: { socket: false },
+        // };
 
         if (routeMethod !== 'HEAD' && routeMethod !== 'GET') {
           // maxBytes: Increase request size from 1MB default limit to 10MB.
@@ -408,7 +430,7 @@ class Offline {
           method: routeMethod,
           path: fullPath,
           config: routeConfig,
-          handler: (request, reply) => { // Here we go
+          handler: async (request, h) => { // Here we go
             // Payload processing
             const isGzip = request.headers['content-encoding'] === 'gzip'
             if (isGzip) {
@@ -416,7 +438,11 @@ class Offline {
               delete request.headers['content-encoding']
               delete request.headers['Content-Encoding']
             }
+            debugLog(`request.payload ${request.payload}`)
+            console.trace()
             request.payload = request.payload && request.payload.toString();
+            if (request.payload === undefined)
+              request.payload = null
 
             // Headers processing
             // Hapi lowercases the headers whereas AWS does not
@@ -461,19 +487,17 @@ class Offline {
             // this.serverlessLog(protectedRoutes);
             // Check for APIKey
             if (_.includes(protectedRoutes, `${routeMethod}#${fullPath}`) || _.includes(protectedRoutes, `ANY#${fullPath}`)) {
-              const errorResponse = response => response({ message: 'Forbidden' }).code(403).type('application/json').header('x-amzn-ErrorType', 'ForbiddenException');
+              const errorResponse = h => h.response({ message: 'Forbidden' }).code(403).type('application/json').header('x-amzn-ErrorType', 'ForbiddenException');
               if ('x-api-key' in request.headers) {
                 const requestToken = request.headers['x-api-key'];
                 if (requestToken !== this.options.apiKey) {
                   debugLog(`Method ${method} of function ${funName} token ${requestToken} not valid`);
-
-                  return errorResponse(reply);
+                  return errorResponse(h);
                 }
               }
               else {
                 debugLog(`Missing x-api-key on private function ${funName}`);
-
-                return errorResponse(reply);
+                return errorResponse(h);
               }
             }
             // Shared mutable state is the root of all evil they say
@@ -482,7 +506,7 @@ class Offline {
             this.currentRequestId = requestId;
 
             // Holds the response to do async op
-            const response = reply.response().hold();
+            const response = h.response();
             const contentType = request.mime || defaultContentType;
 
             // default request template to '' if we don't have a definition pushed in from serverless or endpoint
@@ -751,7 +775,7 @@ class Offline {
               }
 
               // Bon voyage!
-              response.send();
+              return response;
             });
 
             // Now we are outside of createLambdaContext, so this happens before the handler gets called:
@@ -764,6 +788,7 @@ class Offline {
 
             // Finally we call the handler
             debugLog('_____ CALLING HANDLER _____');
+            debugLog(`event ${JSON.stringify(event, null, 2)} ${JSON.stringify(lambdaContext, null, 2)}`);
             try {
               const x = handler(event, lambdaContext, lambdaContext.done);
 
@@ -772,6 +797,7 @@ class Offline {
                 if (x && typeof x.then === 'function' && typeof x.catch === 'function') x.then(lambdaContext.succeed).catch(lambdaContext.fail);
                 else if (x instanceof Error) lambdaContext.fail(x);
               }
+              return x
             }
             catch (error) {
               return this._reply500(response, `Uncaught error in your '${funName}' handler`, error, requestId);
@@ -868,12 +894,11 @@ class Offline {
   end() {
     this.serverlessLog('Halting offline server');
     this.server.stop({ timeout: 5000 })
-    .then(() => process.exit(this.exitCode));
+      .then(() => process.exit(this.exitCode));
   }
 
   // Bad news
-  _reply500(response, message, err, requestId) {
-
+  _reply500(h, message, err, requestId) {
     if (this._clearTimeout(requestId)) return;
 
     this.requests[requestId].done = true;
@@ -881,33 +906,67 @@ class Offline {
     const stackTrace = this._getArrayStackTrace(err.stack);
 
     this.serverlessLog(message);
-    console.log(stackTrace || err);
+    console.error(stackTrace || err);
 
-    /* eslint-disable no-param-reassign */
-    response.statusCode = 200; // APIG replies 200 by default on failures
-    response.source = {
+    const payload = {
       errorMessage: message,
       errorType: err.constructor.name,
       stackTrace,
       offlineInfo: 'If you believe this is an issue with the plugin please submit it, thanks. https://github.com/dherault/serverless-offline/issues',
     };
-    /* eslint-enable no-param-reassign */
+
     this.serverlessLog('Replying error in handler');
-    response.send();
+
+    return h.response(payload).code(200);
   }
 
-  _replyTimeout(response, funName, funTimeout, requestId) {
+  // _reply500(response, message, err, requestId) {
+
+  //   if (this._clearTimeout(requestId)) return;
+
+  //   this.requests[requestId].done = true;
+
+  //   const stackTrace = this._getArrayStackTrace(err.stack);
+
+  //   this.serverlessLog(message);
+  //   console.log(stackTrace || err);
+
+  //   /* eslint-disable no-param-reassign */
+  //   response.statusCode = 200; // APIG replies 200 by default on failures
+  //   response.source = {
+  //     errorMessage: message,
+  //     errorType: err.constructor.name,
+  //     stackTrace,
+  //     offlineInfo: 'If you believe this is an issue with the plugin please submit it, thanks. https://github.com/dherault/serverless-offline/issues',
+  //   };
+  //   /* eslint-enable no-param-reassign */
+  //   this.serverlessLog('Replying error in handler');
+  //   return response;
+  // }
+
+  _replyTimeout(h, funName, funTimeout, requestId) {
     if (this.currentRequestId !== requestId) return;
 
     this.requests[requestId].done = true;
 
     this.serverlessLog(`Replying timeout after ${funTimeout}ms`);
-    /* eslint-disable no-param-reassign */
-    response.statusCode = 503;
-    response.source = `[Serverless-Offline] Your λ handler '${funName}' timed out after ${funTimeout}ms.`;
-    /* eslint-enable no-param-reassign */
-    response.send();
+
+    const message = `[Serverless-Offline] Your λ handler '${funName}' timed out after ${funTimeout}ms.`;
+    return h.response(message).code(503);
   }
+
+  // _replyTimeout(response, funName, funTimeout, requestId) {
+  //   if (this.currentRequestId !== requestId) return;
+
+  //   this.requests[requestId].done = true;
+
+  //   this.serverlessLog(`Replying timeout after ${funTimeout}ms`);
+  //    eslint-disable no-param-reassign
+  //   response.statusCode = 503;
+  //   response.source = `[Serverless-Offline] Your λ handler '${funName}' timed out after ${funTimeout}ms.`;
+  //   /* eslint-enable no-param-reassign */
+  //   return response;
+  // }
 
   _clearTimeout(requestId) {
     const timeout = this.requests[requestId].timeout;
@@ -916,7 +975,12 @@ class Offline {
   }
 
   _createResourceRoutes() {
+console.log('🛠 Registering resource routes...');
+// console.log('this.options.routes:', this.options.routes);
+
     if (!this.options.resourceRoutes) return true;
+
+console.log('🛠 this.options.resourceRoutes');
     const resourceRoutesOptions = this.options.resourceRoutes;
     const resourceRoutes = parseResources(this.service.resources);
 
@@ -924,6 +988,9 @@ class Offline {
 
     this.printBlankLine();
     this.serverlessLog('Routes defined in resources:');
+
+console.log('🧪 resourceRoutes:', resourceRoutes);
+console.log('🧪 keys:', Object.keys(resourceRoutes));
 
     Object.keys(resourceRoutes).forEach(methodId => {
       const resourceRoutesObj = resourceRoutes[methodId];
@@ -952,21 +1019,106 @@ class Offline {
 
       this.serverlessLog(`${method} ${pathResource} -> ${proxyUriInUse}`);
 
-      this.server.route({
-        method,
-        path,
-        config: { cors: this.options.corsConfig },
-        handler: (request, reply) => {
-          const params = request.params;
-          let resultUri = proxyUriInUse;
+// this.server.route({
+//   method,
+//   path,
+//   handler: {
+//     proxy: {
+//       mapUri: (request) => {
+//         let resultUri = proxyUriInUse;
+//         for (const [key, value] of Object.entries(request.params)) {
+//           resultUri = resultUri.replace(`{${key}}`, value);
+//         }
+//         return { uri: resultUri };
+//       },
+//       onResponse: async (err, res, request, h) => {
+//         const response = h.response(res);
+//         response.headers['access-control-allow-origin'] = '*';
+//         response.headers['access-control-allow-credentials'] = 'true';
+//         response.headers['access-control-allow-methods'] = 'GET, POST, OPTIONS, PUT, DELETE';
+//         response.headers['access-control-allow-headers'] = 'Content-Type, Authorization, X-Requested-With, cache';
+//         return response;
+//       }
+//     }
+//   },
+//   options: {
+//     cors: {
+//       origin: ['*'],
+//       credentials: true,
+//       headers: ['Content-Type', 'Authorization', 'X-Requested-With', 'cache']
+//     }
+//   }
+// });
+console.log(`✅ Registering: ${method} ${path}`);
+this.server.route({
+  method,
+  path,
+  handler: {
+    proxy: {
+      mapUri: (request) => {
+        let uri = proxyUriInUse;
+        for (const [key, value] of Object.entries(request.params)) {
+          uri = uri.replace(`{${key}}`, value);
+        }
+        console.log('🔁 Proxying to:', uri);
+        return { uri };
+      },
+      onResponse: async (err, res, request, h) => {
+        if (err) {
+          console.error('❌ Proxy error:', err);
+          return h.response({ error: 'Proxy failed', detail: err.message }).code(502);
+        }
 
-          Object.keys(params).forEach(key => {
-            resultUri = resultUri.replace(`{${key}}`, params[key]);
-          });
+        console.log('✅ Received upstream response');
+        const raw = await res.text?.(); // handle raw body
+// const chunks = [];
 
-          reply.proxy({ uri: resultUri });
-        },
-      });
+// for await (const chunk of res) {
+//   chunks.push(chunk);
+// }
+
+// const body = Buffer.concat(chunks).toString('utf8');
+
+// // Now you can inspect or transform it
+// console.log('📦 Response body:', body);
+
+        const response = h.response(raw || res);
+
+        response.headers['access-control-allow-origin'] = '*';
+        response.headers['content-type'] = res.headers['content-type'] || 'text/html';
+        return response;
+      }
+    }
+  },
+  options: {
+    cors: {
+      origin: ['*'],
+      credentials: true,
+      headers: ['Content-Type', 'Authorization', 'X-Requested-With', 'cache']
+    }
+  }
+});
+console.log(`✅ Registered: ${method} ${path}`);
+
+
+      // this.server.route({
+      //   method,
+      //   path,
+      //   config: { cors: this.options.corsConfig },
+      //   handler: (request, h) => {
+      //     const params = request.params;
+      //     let resultUri = proxyUriInUse;
+      //     for (const key of Object.keys(params)) {
+      //       resultUri = resultUri.replace(`{${key}}`, params[key]);
+      //     }
+      //     // Delegate to the upstream service via h.proxy (from h2o2 plugin)
+      //     try {
+      //       return h.proxy({ uri: resultUri });
+      //     } catch (err) {
+      //       return this.serverlessLog(`h.proxy: ${resultUri}`);
+      //     }
+      //   }
+      // });
     });
   }
 
@@ -978,18 +1130,38 @@ class Offline {
       method: '*',
       path: '/{p*}',
       config: { cors: this.options.corsConfig },
-      handler: (request, reply) => {
-        const response = reply({
+
+      handler: async (request, h) => {
+        const table = this.server.table();
+
+        const existingRoutes = Array.isArray(table)
+          ? table
+              .filter(route => route.path !== '/{p*}')
+              .sort((a, b) => a.path <= b.path ? -1 : 1)
+              .map(route => `${route.method} - ${route.path}`)
+          : [];
+
+        return h.response({
           statusCode: 404,
           error: 'Serverless-offline: route not found.',
           currentRoute: `${request.method} - ${request.path}`,
-          existingRoutes: this.server.table()[0].table
-            .filter(route => route.path !== '/{p*}') // Exclude this (404) route
-            .sort((a, b) => a.path <= b.path ? -1 : 1) // Sort by path
-            .map(route => `${route.method} - ${route.path}`), // Human-friendly result
-        });
-        response.statusCode = 404;
+          existingRoutes
+        }).code(404);
       },
+
+      // handler: async (request, h) => {
+      //   return h.response({
+      //     statusCode: 404,
+      //     error: 'Serverless-offline: route not found.',
+      //     currentRoute: `${request.method} - ${request.path}`,
+      //     existingRoutes: this.server.table()[0].table
+      //       .filter(route => route.path !== '/{p*}') // Exclude this (404) route
+      //       .sort((a, b) => a.path <= b.path ? -1 : 1) // Sort by path
+      //       .map(route => `${route.method} - ${route.path}`), // Human-friendly result
+      //   });
+      //   response.statusCode = 404;
+      // },
+
     });
   }
 
@@ -1021,3 +1193,90 @@ class Offline {
 process.removeAllListeners('unhandledRejection');
 
 module.exports = Offline;
+
+if (require.main === module) {
+  const Offline = require('./index.js'); // adjust if needed based on file structure
+
+const offline = new Offline(
+  {
+    cli: { log: console.log },
+    config: {
+      servicePath: __dirname  // or any valid path
+    },
+    service: {
+      provider: {
+        name: 'aws',
+        runtime: 'nodejs18.x',
+      },
+      functions: {
+        // info: {
+        //   handler: 'handler.info',
+        //   events: [
+        //     {
+        //       http: {
+        //         method: 'get',
+        //         path: 'info'
+        //       }
+        //     }
+        //   ]
+        // }
+      },
+      resources: {
+        Resources: {
+          InfoResource: {
+            Type: 'AWS::ApiGateway::Resource',
+            Properties: {
+              ParentId: { 'Fn::GetAtt': ['ApiGatewayRestApi', 'RootResourceId'] },
+              PathPart: 'info',
+              RestApiId: { Ref: 'ApiGatewayRestApi' }
+            }
+          },
+          InfoGetMethod: {
+            Type: 'AWS::ApiGateway::Method',
+            Properties: {
+              ResourceId: { Ref: 'InfoResource' },
+              RestApiId: { Ref: 'ApiGatewayRestApi' },
+              AuthorizationType: 'NONE',
+              HttpMethod: 'GET',
+              Integration: {
+                Type: 'HTTP_PROXY',
+                IntegrationHttpMethod: 'GET',
+                Uri: 'http://localhost:3001/info',
+                IntegrationResponses: [{ StatusCode: 200 }]
+              },
+              MethodResponses: [{ StatusCode: 200 }]
+            }
+          }
+        }
+      },
+      getFunction: function (functionKey) {
+        return this.functions[functionKey];
+      }
+    },
+    getProvider: () => ({
+      request: () => Promise.resolve()
+    })
+  },
+  {
+    port: 21012,
+    corsConfig: {
+      origin: ['*'],
+      headers: ['Content-Type', 'Authorization', 'X-Requested-With', 'cache'],
+      credentials: true
+    },
+    resourceRoutes: true
+  }
+);
+
+  const run = async () => {
+    try {
+      await offline._buildServer();
+      await offline.server.start();
+      console.log(`✅ Server running at: ${offline.server.info.uri}`);
+    } catch (err) {
+      console.error('🔥 Server start error:', err);
+    }
+  };
+
+  run();
+}
