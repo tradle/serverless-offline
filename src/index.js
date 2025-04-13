@@ -441,8 +441,6 @@ console.log(`Service runtime: ${serviceRuntime}`)
             debugLog(`request.payload ${request.payload}`)
             console.trace()
             request.payload = request.payload && request.payload.toString();
-            if (request.payload === undefined)
-              request.payload = null
 
             // Headers processing
             // Hapi lowercases the headers whereas AWS does not
