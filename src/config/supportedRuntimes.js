@@ -27,6 +27,8 @@ export const supportedNodejs = new Set([
   'nodejs12.x',
   'nodejs14.x',
   'nodejs16.x',
+  'nodejs18.x',
+  'nodejs18.x-aws-sdk-v2',
 ])
 
 // PROVIDED
