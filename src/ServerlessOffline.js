@@ -65,6 +65,10 @@ export default class ServerlessOffline {
     }
   }
 
+  get options() {
+    return this.#options
+  }
+
   _printBlankLine() {
     if (env.NODE_ENV !== 'test') {
       if (this.log) {
